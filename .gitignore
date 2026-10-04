@@ -1,0 +1,17 @@
+# Python & Virtual Environment
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Secret Keys
+.env
+
+# Local Database & Output files
+*.db
+chroma_db/
+workspace_output/
+
+# IDE & Node files
+.vscode/
+node_modules/
