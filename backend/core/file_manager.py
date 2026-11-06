@@ -8,7 +8,6 @@ file reading, and safe file updates.
 
 from pathlib import Path, PureWindowsPath
 
-
 # Base directory where all generated projects are stored
 BASE_WORKSPACE = Path("workspace_output")
 
@@ -61,7 +60,11 @@ def get_safe_file_path(project_id: str, file_path: str) -> Path:
 
     # Reject Windows drive-based paths
     if PureWindowsPath(file_path).drive:
-        raise ValueError("Drive-based file paths are not allowed.")
+        raise ValueError("Drive-based paths are not allowed.")
+
+    # Reject Windows alternate data stream syntax
+    if ":" in file_path:
+        raise ValueError("Colon characters are not allowed in file paths.")
 
     # Reject parent-directory traversal
     if ".." in Path(file_path).parts or ".." in PureWindowsPath(file_path).parts:
@@ -113,6 +116,9 @@ def read_file(project_id: str, file_path: str) -> str:
 
 def apply_patch(project_id: str, file_path: str, new_content: str) -> Path:
     """Update an existing file with new content."""
+
+    if not isinstance(new_content, str):
+        raise TypeError("New content must be a string.")
 
     target_path = get_safe_file_path(project_id, file_path)
 

@@ -2,8 +2,9 @@
 """
 Code Generation Agent for Multi-Agent AI DevTeam.
 
-Generates source code using Google Gemini API
-and saves generated files into the project workspace.
+Generates source code using Google Gemini API,
+validates generated files, and saves them securely
+into the project workspace.
 """
 
 import json
@@ -13,7 +14,6 @@ from pydantic import BaseModel, Field
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import PydanticOutputParser
 
 from backend.schemas.state import AgentState, GeneratedFile
 from backend.config import config
@@ -34,11 +34,12 @@ class GeneratedFilesResponse(BaseModel):
 
 def run_code_generation_agent(state: AgentState) -> AgentState:
     """
-    Generates project source code using Gemini and saves
-    the generated files into the project workspace.
+    Generates project source code using Gemini,
+    validates the generated files, and saves them
+    into the project workspace.
     """
 
-    # Step 1: Update agent status and initialize logs
+    # Step 1: Initialize agent state
     state["current_agent"] = "Code Generation Agent"
     state["status"] = "coding"
 
@@ -53,7 +54,8 @@ def run_code_generation_agent(state: AgentState) -> AgentState:
     )
 
     try:
-        # Step 2: Extract information from shared AgentState
+
+        # Step 2: Extract information from AgentState
         project_id = state.get("project_id")
         user_prompt = state.get("user_prompt", "")
 
@@ -79,17 +81,17 @@ def run_code_generation_agent(state: AgentState) -> AgentState:
             google_api_key=config.GEMINI_API_KEY,
         )
 
-        # Step 5: Initialize Pydantic output parser
-        parser = PydanticOutputParser(
-            pydantic_object=GeneratedFilesResponse
+        # Step 5: Enable structured output
+        structured_llm = llm.with_structured_output(
+            GeneratedFilesResponse
         )
 
         # Step 6: Create code generation prompt
         prompt_template = PromptTemplate(
             template="""You are an expert Senior Software Engineer.
 
-Generate complete, functional source code based on the
-requirements and architecture provided.
+Generate complete, functional source code based on
+the requirements and architecture provided.
 
 USER REQUEST:
 {user_prompt}
@@ -101,6 +103,7 @@ ARCHITECTURE BLUEPRINT:
 {architecture_blueprint}
 
 INSTRUCTIONS:
+
 1. Follow the provided architecture strictly.
 2. Generate every file listed in files_to_generate.
 3. Generate complete and executable code, not pseudocode.
@@ -109,9 +112,9 @@ INSTRUCTIONS:
 6. Include necessary error handling.
 7. Ensure all generated files are compatible with each other.
 8. Do not generate unnecessary files.
-9. Return source code as plain text inside the content field.
-10. Do not wrap source code in Markdown code fences.
-11. Return valid structured output according to the given schema.
+9. Put complete source code inside each file's content field.
+10. Do not include Markdown code fences inside content.
+11. Return output matching this JSON schema:
 
 {format_instructions}
 """,
@@ -121,7 +124,10 @@ INSTRUCTIONS:
                 "architecture_blueprint",
             ],
             partial_variables={
-                "format_instructions": parser.get_format_instructions()
+                "format_instructions": json.dumps(
+                    GeneratedFilesResponse.model_json_schema(),
+                    indent=2
+                )
             },
         )
 
@@ -129,10 +135,12 @@ INSTRUCTIONS:
         formatted_prompt = prompt_template.format(
             user_prompt=user_prompt,
             requirement_spec=json.dumps(
-                requirement_spec, indent=2
+                requirement_spec,
+                indent=2
             ),
             architecture_blueprint=json.dumps(
-                architecture_blueprint, indent=2
+                architecture_blueprint,
+                indent=2
             ),
         )
 
@@ -140,49 +148,95 @@ INSTRUCTIONS:
             "[Code Generation Agent] Sending architecture to Gemini..."
         )
 
-        # Step 8: Invoke Gemini
-        response = llm.invoke(formatted_prompt)
+        # Step 8: Generate structured response
+        parsed_response = structured_llm.invoke(
+            formatted_prompt
+        )
 
-        # Step 9: Extract text from Gemini response
-        response_text = response.content
+        if isinstance(parsed_response, dict):
+            parsed_response = GeneratedFilesResponse.model_validate(
+                parsed_response
+            )
 
-        if isinstance(response_text, list):
-            text_blocks = []
-
-            for block in response_text:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    text_blocks.append(block.get("text", ""))
-
-                elif isinstance(block, str):
-                    text_blocks.append(block)
-
-            response_text = "\n".join(text_blocks)
-
-        if not isinstance(response_text, str) or not response_text.strip():
-            raise ValueError("Gemini returned an empty response.")
-
-        # Step 10: Parse and validate generated files
-        parsed_response = parser.parse(response_text)
+        if not isinstance(parsed_response, GeneratedFilesResponse):
+            raise ValueError(
+                "Gemini returned an invalid structured response."
+            )
 
         if not parsed_response.files:
-            raise ValueError("Gemini generated no project files.")
+            raise ValueError(
+                "Gemini generated no project files."
+            )
+
+        # Step 9: Validate generated files against architecture
+        expected_files = architecture_blueprint.get(
+            "files_to_generate", []
+        )
+
+        if not expected_files:
+            raise ValueError(
+                "Architecture does not specify files to generate."
+            )
+
+        expected_paths = {
+            path.strip().replace("\\", "/")
+            for path in expected_files
+        }
+
+        generated_paths = [
+            file.path.strip().replace("\\", "/")
+            for file in parsed_response.files
+        ]
+
+        # Check for duplicate paths
+        if len(generated_paths) != len(set(generated_paths)):
+            raise ValueError(
+                "Gemini generated duplicate file paths."
+            )
+
+        generated_path_set = set(generated_paths)
+
+        # Check for missing files
+        missing_files = expected_paths - generated_path_set
+
+        # Check for unexpected files
+        unexpected_files = generated_path_set - expected_paths
+
+        if missing_files:
+            raise ValueError(
+                f"Missing required files: {sorted(missing_files)}"
+            )
+
+        if unexpected_files:
+            raise ValueError(
+                f"Unexpected files generated: {sorted(unexpected_files)}"
+            )
+
+        state["logs"].append(
+            "[Code Generation Agent] Architecture validation passed."
+        )
 
         state["logs"].append(
             f"[Code Generation Agent] Gemini generated "
             f"{len(parsed_response.files)} files."
         )
 
-        # Step 11: Create project workspace
+        # Step 10: Create project workspace
         project_path = create_project_directory(project_id)
 
         generated_files = []
 
-        # Step 12: Save generated files
+        # Step 11: Save generated files
         for generated_file in parsed_response.files:
 
             if not generated_file.path.strip():
                 raise ValueError(
                     "Generated file path cannot be empty."
+                )
+
+            if not generated_file.content.strip():
+                raise ValueError(
+                    f"Generated file is empty: {generated_file.path}"
                 )
 
             saved_path = write_file(
@@ -199,7 +253,7 @@ INSTRUCTIONS:
                 f"[Code Generation Agent] Saved: {saved_path}"
             )
 
-        # Step 13: Update shared AgentState
+        # Step 12: Update AgentState
         state["generated_files"] = generated_files
         state["workspace_path"] = str(project_path)
         state["status"] = "completed"
