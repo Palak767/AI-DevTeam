@@ -618,3 +618,49 @@ def test_invalid_python_prevents_all_file_writes(
     create_directory_mock.assert_not_called()
 
     assert result["generated_files"] == []
+
+
+# --------------------------------------------------
+# Additional support files validation
+# --------------------------------------------------
+
+def test_allow_additional_support_files(tmp_path, monkeypatch):
+
+    monkeypatch.setattr(
+        agent,
+        "get_safe_file_path",
+        lambda project_id, file_path: tmp_path / file_path
+    )
+
+    generated_files = [
+        GeneratedFile(
+            path="main.py",
+            content="print('Hello AI DevTeam')",
+            language="python"
+        ),
+        GeneratedFile(
+            path="app/__init__.py",
+            content="",
+            language="python"
+        ),
+        GeneratedFile(
+            path=".env.example",
+            content="API_KEY=your_api_key_here",
+            language="text"
+        )
+    ]
+
+    validated_files = agent.validate_generated_files(
+        project_id="test_project",
+        expected_files=["main.py"],
+        generated_files=generated_files
+    )
+
+    validated_paths = [
+        file.path for file in validated_files
+    ]
+
+    assert "main.py" in validated_paths
+    assert "app/__init__.py" in validated_paths
+    assert ".env.example" in validated_paths
+    assert len(validated_files) == 3
