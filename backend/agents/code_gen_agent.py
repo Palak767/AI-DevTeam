@@ -3,8 +3,8 @@
 Code Generation Agent for Multi-Agent AI DevTeam.
 
 Generates source code using Google Gemini API,
-validates all generated files before saving, and
-stores them securely in the project workspace.
+validates generated files, and stores them securely
+inside the project workspace.
 """
 
 import ast
@@ -34,7 +34,7 @@ class GeneratedFilesResponse(BaseModel):
 
 
 def normalize_file_path(file_path: str) -> str:
-    """Normalize file paths to a consistent format."""
+    """Normalize file paths to use forward slashes."""
 
     if not isinstance(file_path, str) or not file_path.strip():
         raise ValueError("Generated file path cannot be empty.")
@@ -48,44 +48,56 @@ def validate_generated_files(
     generated_files: List[GeneratedFile],
 ) -> List[GeneratedFile]:
     """
-    Validate every generated file before saving anything.
+    Validate every generated file before saving.
 
     Checks:
-    1. Expected file list
-    2. Duplicate paths
-    3. Missing and unexpected files
-    4. Empty paths and content
-    5. Unsafe file paths
-    6. Python syntax
+    1. Architecture file list.
+    2. Path normalization.
+    3. Duplicate paths.
+    4. Missing required files.
+    5. Unexpected files.
+    6. Empty file content.
+    7. Unsafe file paths.
+    8. Python syntax.
     """
 
+    # 1. Validate architecture file list.
     if not isinstance(expected_files, list) or not expected_files:
         raise ValueError(
             "Architecture does not specify valid files to generate."
         )
 
-    if not generated_files:
+    if not isinstance(generated_files, list) or not generated_files:
         raise ValueError("Gemini generated no project files.")
 
-    # Normalize and validate architecture paths.
-    expected_paths = []
+    # 2. Normalize expected architecture paths.
+    expected_paths = [
+        normalize_file_path(path)
+        for path in expected_files
+    ]
 
-    for path in expected_files:
-        normalized_path = normalize_file_path(path)
-        expected_paths.append(normalized_path)
-
+    # 3. Reject duplicate architecture paths.
     if len(expected_paths) != len(set(expected_paths)):
         raise ValueError(
             "Architecture contains duplicate file paths."
         )
 
-    # Normalize generated paths.
+    # 4. Normalize and validate generated files.
     normalized_files = []
 
     for generated_file in generated_files:
-        normalized_path = normalize_file_path(generated_file.path)
 
-        if not generated_file.content.strip():
+        normalized_path = normalize_file_path(
+            generated_file.path
+        )
+
+        file_name = normalized_path.rsplit("/", 1)[-1]
+
+        # Empty __init__.py files are valid package markers.
+        if (
+            not generated_file.content.strip()
+            and file_name != "__init__.py"
+        ):
             raise ValueError(
                 f"Generated file is empty: {normalized_path}"
             )
@@ -96,11 +108,12 @@ def validate_generated_files(
             )
         )
 
+    # 5. Extract generated paths.
     generated_paths = [
         file.path for file in normalized_files
     ]
 
-    # Check duplicate generated paths.
+    # 6. Reject duplicate generated paths.
     if len(generated_paths) != len(set(generated_paths)):
         raise ValueError(
             "Gemini generated duplicate file paths."
@@ -109,7 +122,7 @@ def validate_generated_files(
     expected_path_set = set(expected_paths)
     generated_path_set = set(generated_paths)
 
-    # Check missing files.
+    # 7. Check for missing required files.
     missing_files = expected_path_set - generated_path_set
 
     if missing_files:
@@ -117,30 +130,44 @@ def validate_generated_files(
             f"Missing required files: {sorted(missing_files)}"
         )
 
-    # Check unexpected files.
+    # 8. Check unexpected files.
     unexpected_files = generated_path_set - expected_path_set
 
-    if unexpected_files:
+    # Allow only additional package markers and .env.example.
+    allowed_support_files = {
+        path
+        for path in unexpected_files
+        if (
+            path.rsplit("/", 1)[-1] == "__init__.py"
+            or path == ".env.example"
+        )
+    }
+
+    rejected_files = unexpected_files - allowed_support_files
+
+    if rejected_files:
         raise ValueError(
-            f"Unexpected files generated: {sorted(unexpected_files)}"
+            f"Unexpected files generated: {sorted(rejected_files)}"
         )
 
-    # Validate file paths and Python syntax.
+    # 9. Validate path safety and Python syntax.
+    # All files are validated before any file is saved.
     for generated_file in normalized_files:
 
-        # Use File Manager's existing security validation.
         get_safe_file_path(
             project_id=project_id,
             file_path=generated_file.path,
         )
 
-        # Check Python syntax without executing the code.
+        # Parse Python files without executing them.
         if generated_file.path.endswith(".py"):
+
             try:
                 ast.parse(
                     generated_file.content,
                     filename=generated_file.path,
                 )
+
             except SyntaxError as error:
                 raise ValueError(
                     f"Python syntax error in "
@@ -152,12 +179,18 @@ def validate_generated_files(
 
 def run_code_generation_agent(state: AgentState) -> AgentState:
     """
-    Generates project source code using Gemini,
-    validates all generated files, and saves them
-    into the project workspace.
+    Generate project source code using Gemini.
+
+    Steps:
+    1. Read requirements and architecture.
+    2. Send information to Gemini.
+    3. Receive structured generated files.
+    4. Validate generated files.
+    5. Save validated files in workspace.
+    6. Update AgentState.
     """
 
-    # Step 1: Initialize agent state.
+    # STEP 1: Initialize agent state.
     state["current_agent"] = "Code Generation Agent"
     state["status"] = "coding"
 
@@ -172,43 +205,63 @@ def run_code_generation_agent(state: AgentState) -> AgentState:
     )
 
     try:
-        # Step 2: Extract information from AgentState.
+
+        # STEP 2: Extract information from AgentState.
         project_id = state.get("project_id")
         user_prompt = state.get("user_prompt", "")
 
         requirement_spec = state.get("requirement_spec")
-        architecture_blueprint = state.get("architecture_blueprint")
 
-        if not project_id:
+        architecture_blueprint = state.get(
+            "architecture_blueprint"
+        )
+
+        # STEP 3: Validate project ID.
+        if project_id is None or project_id == "":
             raise ValueError("Project ID is missing.")
 
+        if not isinstance(project_id, str) or not project_id.strip():
+            raise ValueError("Project ID is invalid.")
+
+        # STEP 4: Validate requirements and architecture.
         if not requirement_spec:
-            raise ValueError("Requirement specification is missing.")
+            raise ValueError(
+                "Requirement specification is missing."
+            )
 
         if not architecture_blueprint:
-            raise ValueError("Architecture blueprint is missing.")
+            raise ValueError(
+                "Architecture blueprint is missing."
+            )
 
-        # Step 3: Validate Gemini API key.
+        if not isinstance(architecture_blueprint, dict):
+            raise ValueError(
+                "Architecture blueprint must be a dictionary."
+            )
+
+        # STEP 5: Validate Gemini API key.
         if not config.GEMINI_API_KEY:
-            raise ValueError("Gemini API key is not configured.")
+            raise ValueError(
+                "Gemini API key is not configured."
+            )
 
-        # Step 4: Initialize Gemini LLM.
+        # STEP 6: Initialize Gemini LLM.
         llm = ChatGoogleGenerativeAI(
             model=config.LLM_MODEL,
             google_api_key=config.GEMINI_API_KEY,
         )
 
-        # Step 5: Enable structured output.
+        # STEP 7: Enable structured output.
         structured_llm = llm.with_structured_output(
             GeneratedFilesResponse
         )
 
-        # Step 6: Create code generation prompt.
+        # STEP 8: Create code generation prompt.
         prompt_template = PromptTemplate(
             template="""You are an expert Senior Software Engineer.
 
-Generate complete, functional source code based on
-the requirements and architecture provided.
+Your task is to generate complete, functional source code
+based on the requirements and architecture provided below.
 
 USER REQUEST:
 {user_prompt}
@@ -225,14 +278,20 @@ INSTRUCTIONS:
 2. Generate every file listed in files_to_generate.
 3. Generate complete source code, not pseudocode.
 4. Follow the specified technology stack.
-5. Ensure proper imports, naming conventions and modularity.
-6. Include necessary error handling.
+5. Use proper imports, naming conventions and modularity.
+6. Include appropriate error handling.
 7. Ensure all generated files are compatible with each other.
 8. Do not generate unnecessary files.
 9. Put complete source code inside each file's content field.
-10. Do not include Markdown code fences inside content.
+10. Do not include Markdown code fences inside file content.
 11. Ensure every Python file has valid Python syntax.
-12. Return output matching this JSON schema:
+12. Empty __init__.py files are allowed when appropriate.
+13. Additional __init__.py package marker files are allowed.
+14. An optional .env.example configuration template is allowed.
+15. Do not leave other required source files empty.
+16. Do not generate any other files outside the architecture,
+    except the allowed support files above.
+17. Return output matching this JSON schema:
 
 {format_instructions}
 """,
@@ -249,16 +308,18 @@ INSTRUCTIONS:
             },
         )
 
-        # Step 7: Format the prompt.
+        # STEP 9: Format prompt with project information.
         formatted_prompt = prompt_template.format(
             user_prompt=user_prompt,
             requirement_spec=json.dumps(
                 requirement_spec,
                 indent=2,
+                default=str,
             ),
             architecture_blueprint=json.dumps(
                 architecture_blueprint,
                 indent=2,
+                default=str,
             ),
         )
 
@@ -266,22 +327,29 @@ INSTRUCTIONS:
             "[Code Generation Agent] Sending architecture to Gemini..."
         )
 
-        # Step 8: Generate structured response.
-        parsed_response = structured_llm.invoke(formatted_prompt)
+        # STEP 10: Generate structured response.
+        parsed_response = structured_llm.invoke(
+            formatted_prompt
+        )
 
+        # Handle dictionary responses.
         if isinstance(parsed_response, dict):
             parsed_response = GeneratedFilesResponse.model_validate(
                 parsed_response
             )
 
-        if not isinstance(parsed_response, GeneratedFilesResponse):
+        if not isinstance(
+            parsed_response,
+            GeneratedFilesResponse,
+        ):
             raise ValueError(
                 "Gemini returned an invalid structured response."
             )
 
-        # Step 9: Validate all generated files BEFORE saving.
+        # STEP 11: Validate generated files BEFORE saving.
         expected_files = architecture_blueprint.get(
-            "files_to_generate", []
+            "files_to_generate",
+            [],
         )
 
         validated_files = validate_generated_files(
@@ -299,10 +367,10 @@ INSTRUCTIONS:
             f"{len(validated_files)} valid files."
         )
 
-        # Step 10: Create project workspace only after validation.
+        # STEP 12: Create project workspace.
         project_path = create_project_directory(project_id)
 
-        # Step 11: Save validated files.
+        # STEP 13: Save validated files.
         saved_files = []
 
         for generated_file in validated_files:
@@ -321,7 +389,7 @@ INSTRUCTIONS:
                 f"[Code Generation Agent] Saved: {saved_path}"
             )
 
-        # Step 12: Update AgentState.
+        # STEP 14: Update AgentState.
         state["generated_files"] = saved_files
         state["workspace_path"] = str(project_path)
         state["status"] = "completed"
